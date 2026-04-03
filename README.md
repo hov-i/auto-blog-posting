@@ -24,24 +24,26 @@ flowchart TD
         F([매주 월요일 09:00 KST])
         F --> G[generate.ts 실행]
         G --> H[(Supabase\nprocessed: false\n대화 조회)]
-        G --> I[Notion API\n새 글 수집]
-        H --> J[Claude API 호출\nclaude-sonnet-4-6]
+        G --> I[Notion API\n이번 주 수정 글 수집]
+        H --> J["⚡ 병렬 처리\nClaude API 호출\nclaude-sonnet-4-6"]
         I --> J
-        J --> K[(Supabase\ndraft_posts\nstatus: pending\nconversation_data 포함)]
-        K --> L[conversations\nprocessed: true]
+        J --> K{성공?}
+        K -->|✅ 성공| L[(Supabase\ndraft_posts\nstatus: pending\nconversation_data 포함)]
+        K -->|✅ 성공| M[conversations\nprocessed: true]
+        K -->|❌ 실패| N[processed: false 유지\n다음 주 재시도]
     end
 
-    K --> M
+    L --> O
 
     subgraph STEP3["STEP 3 · 리뷰 — 블로그 UI · 비선형"]
-        M([/admin/drafts 접속])
-        M --> N[초안 목록 확인]
-        N --> O{선택}
-        O -->|발제하기| P[Prisma post 생성\n블로그에 게시!]
-        O -->|삭제| Q[draft 삭제]
-        O -->|재생성| R[conversation_data 꺼냄\nClaude API 재호출]
-        R --> S[새 초안으로 업데이트\nUI 즉시 반영]
-        S --> N
+        O([/admin/drafts 접속])
+        O --> P[초안 목록 확인]
+        P --> Q{선택}
+        Q -->|발제하기| R[Prisma post 생성\n블로그에 게시!]
+        Q -->|삭제| S[draft 삭제]
+        Q -->|재생성| T[conversation_data 꺼냄\nClaude API 재호출]
+        T --> U[새 초안으로 업데이트\nUI 즉시 반영]
+        U --> P
     end
 ```
 
@@ -56,12 +58,13 @@ flowchart LR
     end
 
     subgraph SUPABASE["Supabase"]
-        B[("conversations\n─────────\nproject_name\nfile_key\nmessages\nprocessed: false")]
+        B[("conversations\n─────────\nproject_name / file_key\nmessages\nprocessed: false → true")]
         C[("draft_posts\n─────────\ntitle / content\ntags / description\nconversation_data ← 재생성용\nstatus: pending")]
     end
 
     subgraph CLOUD["GitHub Actions (주 1회)"]
-        D["generate.ts\n+ Notion API"]
+        N["Notion API\n이번 주 수정 글"]
+        D["generate.ts\n⚡ 병렬 처리"]
         E["Claude API\nclaude-sonnet-4-6"]
     end
 
@@ -71,9 +74,11 @@ flowchart LR
     end
 
     A -->|"npm run sync\n(Stop Hook 자동)"| B
+    N -->|"직접 수집"| D
     B -->|"미처리 대화 조회"| D
     D --> E
-    E -->|"초안 저장"| C
+    E -->|"✅ 성공한 것만 저장"| C
+    E -->|"✅ 성공한 것만 processed: true"| B
     C -->|"검토"| F
     F -->|"발제하기"| G
     F -->|"재생성"| C
