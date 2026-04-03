@@ -1,0 +1,26 @@
+{
+  "name": "auto-blog-posting",
+  "version": "1.0.0",
+  "description": "Claude Code 대화 로그 → 블로그 자동 포스팅 파이프라인",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "sync": "tsx src/sync.ts",
+    "generate": "tsx src/generate.ts",
+    "collect": "tsx src/collect.ts",
+    "summarize": "tsx src/summarize.ts",
+    "upload": "tsx src/upload-drafts.ts",
+    "pipeline": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
+    "@notionhq/client": "^5.15.0",
+    "@supabase/supabase-js": "^2.49.4",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.13",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
