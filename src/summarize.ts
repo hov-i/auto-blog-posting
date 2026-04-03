@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { jsonrepair } from "jsonrepair";
 import { ProjectConversation } from "./collect.js";
 
 export interface DraftPost {
@@ -20,7 +21,6 @@ const BLOG_STYLE_TEMPLATE = `
 ### 공통 말투 & 톤
 - 1인칭 경험담 중심 ("나는 ~했다", "~게 느꼈다", "~인 줄 알았는데")
 - 딱딱하지 않고 솔직하게, 감정 자연스럽게 표현
-- 말줄임표(..) 로 여운 남기기
 - "사실 ~라는 단점이 있었는데", "생각보다 ~해서 감동 받았다..", "~게 마음에 들었다" 같은 표현 자주 사용
 - 과도한 기술 용어 나열 금지, 맥락과 함께 설명
 
@@ -29,8 +29,9 @@ const BLOG_STYLE_TEMPLATE = `
 ### 글 유형 1: 경험/회고 글 (프로젝트, 협업, 이벤트 참여 후기)
 
 구조:
-1. 헤더 없이 도입 문단 — 이 글을 쓰게 된 계기/맥락 1~2문장
-2. ## 헤더로 섹션 구분
+1. 맨 첫 줄: > 블록쿼트로 이 글을 쓰게 된 계기/맥락 1~2문장
+   예시: > 사이드 프로젝트를 마무리하면서 팀원들과 함께한 시간을 기록으로 남기고 싶어 이 글을 쓰게 되었다.
+2. 빈 줄 하나 띄운 뒤 ## 헤더로 섹션 구분
 3. 기술 선택은 "왜 선택했는지", "어떤 점이 좋았는지" 위주로 풀어서 설명
 4. 이슈/문제는 솔직하게 언급 후 어떻게 해결했는지 공유
 5. 팀/협업 경험이면 팀원에 대한 감사함 자연스럽게 녹이기
@@ -85,7 +86,7 @@ const BLOG_STYLE_TEMPLATE = `
 `;
 
 export async function generateDraftPosts(
-  conversation: ProjectConversation
+  conversation: ProjectConversation,
 ): Promise<DraftPost[]> {
   const conversationText = conversation.messages
     .map((m) => `[${m.role === "user" ? "나" : "AI"}] ${m.text}`)
@@ -103,16 +104,19 @@ export async function generateDraftPosts(
 ${BLOG_STYLE_TEMPLATE}
 
 ⚠️ content 필드 작성 시 절대 규칙:
-- 기술 학습 글이면 content의 첫 줄은 반드시 "> " 로 시작하는 blockquote여야 해 (이 글을 쓰게 된 계기/동기)
-- 그 다음 줄부터 # 헤더로 섹션 시작
-- 절대로 첫 줄에 # 헤더나 일반 텍스트로 시작하면 안 돼
-- 경험/회고 글이면 헤더 없이 일반 텍스트 도입 문단으로 시작
+- 글 유형에 상관없이 content의 첫 줄은 반드시 "> " 로 시작하는 blockquote여야 해
+- blockquote에는 이 글을 쓰게 된 계기/동기/맥락을 1~2문장으로 작성
+- 그 다음 빈 줄 하나 띄운 뒤 본문 시작
+- 기술 학습 글: blockquote 다음 # 헤더로 섹션 시작
+- 경험/회고 글: blockquote 다음 ## 헤더로 섹션 시작
 
-올바른 기술 학습 글 content 시작 예시:
+올바른 예시:
 "> ~을 공부하다가 ~한 궁금증이 생겨서 이 글을 작성하게 되었다.\\n\\n# 첫 번째 섹션\\n..."
+"> 이번 프로젝트를 마치고 나서 느낀 점들을 기록으로 남기고 싶었다.\\n\\n## 프로젝트 소개\\n..."
 
 잘못된 예시 (절대 이렇게 하면 안 됨):
 "# 첫 번째 섹션\\n..." (> blockquote 없이 바로 시작)
+"이번에 ~을 개발하면서..." (일반 텍스트로 시작)
 
 조건:
 - 개발자 블로그 독자를 대상으로 작성
@@ -141,40 +145,59 @@ ${conversationText}
   if (text.type !== "text") return [];
 
   try {
-    const cleaned = text.text
-      .replace(/```json\n?/g, "")
-      .replace(/```\n?/g, "")
-      .trim();
-    const parsed = JSON.parse(cleaned);
-    return parsed.map((p: Omit<DraftPost, "sourceProject" | "conversation">) => ({
-      ...p,
-      sourceProject: conversation.projectName,
-      conversation,
-    }));
-  } catch {
+    const raw = text.text.trim();
+    const start = raw.indexOf("[");
+    const end = raw.lastIndexOf("]");
+    if (start === -1 || end === -1) throw new Error("JSON 배열을 찾을 수 없음");
+    const parsed = JSON.parse(jsonrepair(raw.slice(start, end + 1)));
+    return parsed.map(
+      (p: Omit<DraftPost, "sourceProject" | "conversation">) => ({
+        ...p,
+        sourceProject: conversation.projectName,
+        conversation,
+      }),
+    );
+  } catch (e) {
     console.error(`❌ ${conversation.projectName} JSON 파싱 실패`);
-    console.error("=== Claude 응답 원문 ===");
-    console.error(text.text.slice(-300)); // 끝부분 확인 (잘렸는지 체크)
+    console.error("=== 에러 메시지 ===");
+    console.error(e instanceof Error ? e.message : e);
+    console.error("=== 응답 앞부분 ===");
+    console.error(text.text.slice(0, 200));
+    console.error("=== 응답 끝부분 ===");
+    console.error(text.text.slice(-300));
     console.error("========================");
     return [];
   }
 }
 
 export async function summarizeConversations(
-  conversations: ProjectConversation[]
+  conversations: ProjectConversation[],
 ): Promise<DraftPost[]> {
   if (conversations.length === 0) {
     console.log("📭 이번 주 수집된 대화가 없어요!");
     return [];
   }
 
-  const allDrafts: DraftPost[] = [];
+  console.log(`\n⚡ ${conversations.length}개 대화 병렬 처리 시작...`);
 
-  for (const conversation of conversations) {
-    console.log(`\n✍️  "${conversation.projectName}" 요약 중...`);
-    const drafts = await generateDraftPosts(conversation);
-    console.log(`✅ ${drafts.length}개 초안 생성!`);
-    allDrafts.push(...drafts);
+  const results = await Promise.allSettled(
+    conversations.map(async (conversation) => {
+      console.log(`✍️  "${conversation.projectName}" 요약 중...`);
+      const drafts = await generateDraftPosts(conversation);
+      console.log(
+        `✅ "${conversation.projectName}" ${drafts.length}개 초안 생성!`,
+      );
+      return drafts;
+    }),
+  );
+
+  const allDrafts: DraftPost[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      allDrafts.push(...result.value);
+    } else {
+      console.error(`❌ 초안 생성 실패:`, result.reason);
+    }
   }
 
   console.log(`\n🎉 총 ${allDrafts.length}개 블로그 초안 생성 완료!`);
