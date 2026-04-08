@@ -116,7 +116,7 @@ export function collectWeeklyLogs(): ProjectConversation[] {
       allMessages.push(...weeklyMessages);
     }
 
-    if (allMessages.length > 0) {
+    if (allMessages.length > 5) {
       // 프로젝트 폴더명을 읽기 좋게 변환 (-Users-name-project → project)
       const parts = projectDir.split("-");
       const projectName = parts.slice(3).join("-") || projectDir;

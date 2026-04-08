@@ -13,7 +13,7 @@ flowchart TD
     subgraph STEP1["STEP 1 · 수집 — 로컬 맥 · 무료"]
         B[sync.ts 실행]
         B --> C{새 대화?}
-        C -->|이미 동기화됨| D[⏭스킵]
+        C -->|이미 동기화됨| D[스킵]
         C -->|메시지 5개 미만| D
         C -->|새 대화 발견!| E[(Supabase\nconversations\nprocessed: false)]
     end
@@ -25,12 +25,12 @@ flowchart TD
         F --> G[generate.ts 실행]
         G --> H[(Supabase\nprocessed: false\n대화 조회)]
         G --> I[Notion API\n이번 주 수정 글 수집]
-        H --> J["⚡ 병렬 처리\nClaude API 호출\nclaude-sonnet-4-6"]
+        H --> J["병렬 처리\nClaude API 호출\nclaude-3-5-sonnet-20241022"]
         I --> J
         J --> K{성공?}
-        K -->|✅ 성공| L[(Supabase\ndraft_posts\nstatus: pending\nconversation_data 포함)]
-        K -->|✅ 성공| M[conversations\nprocessed: true]
-        K -->|❌ 실패| N[processed: false 유지\n다음 주 재시도]
+        K -->|성공| L[(Supabase\ndraft_posts\nstatus: pending\nconversation_data 포함)]
+        K -->|성공| M[conversations\nprocessed: true]
+        K -->|실패| N[processed: false 유지\n다음 주 재시도]
     end
 
     L --> O
@@ -39,7 +39,7 @@ flowchart TD
         O([/admin/drafts 접속])
         O --> P[초안 목록 확인]
         P --> Q{선택}
-        Q -->|발제하기| R[Prisma post 생성\n블로그에 게시!]
+        Q -->|발제하기| R[Prisma post 생성\n블로그에 게시]
         Q -->|삭제| S[draft 삭제]
         Q -->|재생성| T[conversation_data 꺼냄\nClaude API 재호출]
         T --> U[새 초안으로 업데이트\nUI 즉시 반영]
@@ -58,14 +58,14 @@ flowchart LR
     end
 
     subgraph SUPABASE["Supabase"]
-        B[("conversations\n─────────\nproject_name / file_key\nmessages\nprocessed: false → true")]
-        C[("draft_posts\n─────────\ntitle / content\ntags / description\nconversation_data ← 재생성용\nstatus: pending")]
+        B[("conversations\n─────────\nproject_name / file_key\nmessages\nprocessed: false -> true")]
+        C[("draft_posts\n─────────\ntitle / content\ntags / description\nconversation_data (재생성용)\nstatus: pending")]
     end
 
     subgraph CLOUD["GitHub Actions (주 1회)"]
         N["Notion API\n이번 주 수정 글"]
-        D["generate.ts\n⚡ 병렬 처리"]
-        E["Claude API\nclaude-sonnet-4-6"]
+        D["generate.ts\n병렬 처리"]
+        E["Claude API\nclaude-3-5-sonnet-20241022\nmax_tokens: 4000"]
     end
 
     subgraph BLOG["블로그 UI"]
@@ -77,8 +77,8 @@ flowchart LR
     N -->|"직접 수집"| D
     B -->|"미처리 대화 조회"| D
     D --> E
-    E -->|"✅ 성공한 것만 저장"| C
-    E -->|"✅ 성공한 것만 processed: true"| B
+    E -->|"성공한 것만 저장"| C
+    E -->|"성공한 것만 processed: true"| B
     C -->|"검토"| F
     F -->|"발제하기"| G
     F -->|"재생성"| C
@@ -88,11 +88,15 @@ flowchart LR
 
 ## 비용 구조
 
-| 단계          | 실행 시점        | Claude API | 비용        |
-| ------------- | ---------------- | ---------- | ----------- |
-| `sync.ts`     | 대화 끝날 때마다 | 없음       | 거의 0      |
-| `generate.ts` | 주 1회           | 사용       | 주 1회만    |
-| 재생성        | 버튼 클릭 시     | 사용       | 필요할 때만 |
+| 단계          | 실행 시점        | 모델                          | 토큰 제한      | 비용        |
+| ------------- | ---------------- | ----------------------------- | -------------- | ----------- |
+| `sync.ts`     | 대화 끝날 때마다 | 없음                          | -              | 거의 0      |
+| `generate.ts` | 주 1회           | claude-3-5-sonnet-20241022    | max_tokens: 4000 | 주 1회만    |
+| 재생성        | 버튼 클릭 시     | claude-3-5-sonnet-20241022    | max_tokens: 4000 | 필요할 때만 |
+
+최적화 포인트:
+- 기존 claude-sonnet-4-6 (8000 토큰) -> claude-3-5-sonnet-20241022 (4000 토큰)
+- 비용 약 50% 절감, 글쓰기 품질은 유지 (Sonnet 3.5는 자연스러운 글쓰기에 최적화)
 
 ---
 
@@ -194,8 +198,8 @@ npm run start
 
 ## GitHub Actions 스케줄
 
-- 실행 시점: **매주 월요일 오전 9시 KST** (UTC 0:00)
-- 수동 실행: GitHub 레포 → Actions 탭 → `블로그 초안 자동 생성` → `Run workflow`
+- 실행 시점: 매주 월요일 오전 9시 KST (UTC 0:00)
+- 수동 실행: GitHub 레포 -> Actions 탭 -> 블로그 초안 자동 생성 -> Run workflow
 
 ---
 

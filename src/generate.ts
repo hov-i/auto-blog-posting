@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import { ProjectConversation } from "./collect.js";
-import { DraftPost, generateDraftPosts, summarizeConversations } from "./summarize.js";
+import { DraftPost, summarizeConversations } from "./summarize.js";
 import { collectNotionContent } from "./collect-notion.js";
 
 function getSupabaseClient() {
@@ -37,39 +37,41 @@ async function main() {
     return;
   }
 
-  // 3. Claude 대화 병렬 처리 (성공한 것만 processed: true)
-  console.log(`\n=== 3단계: 초안 생성 ===`);
-  const allDrafts: DraftPost[] = [];
-  const successfulIds: number[] = [];
+  // 3. 기존 draft_posts 주제 조회 (중복 방지용)
+  console.log(`\n=== 3단계: 기존 주제 조회 ===`);
+  const { data: existingDrafts } = await supabase
+    .from("draft_posts")
+    .select("title")
+    .order("created_at", { ascending: false })
+    .limit(50);
 
-  const claudeResults = await Promise.allSettled(
-    (convRows ?? []).map(async (row) => {
-      const conversation: ProjectConversation = { projectName: row.project_name, messages: row.messages };
-      const drafts = await generateDraftPosts(conversation);
-      return { id: row.id, drafts };
-    })
-  );
+  const existingTopics = (existingDrafts ?? []).map((d) => d.title as string);
+  console.log(`📋 기존 주제 ${existingTopics.length}개 로드 (중복 방지용)`);
 
-  for (const result of claudeResults) {
-    if (result.status === "fulfilled" && result.value.drafts.length > 0) {
-      allDrafts.push(...result.value.drafts);
-      successfulIds.push(result.value.id);
-    } else if (result.status === "rejected") {
-      console.error("❌ Claude 대화 처리 실패:", result.reason);
-    }
+  // 4. 전체 대화 배치로 묶어서 클러스터링 → 초안 생성
+  console.log(`\n=== 4단계: 초안 생성 ===`);
+  const claudeConversations: ProjectConversation[] = (convRows ?? []).map((row) => ({
+    projectName: row.project_name,
+    messages: row.messages,
+  }));
+  const allConversations = [...claudeConversations, ...notionConversations];
+
+  const allDrafts: DraftPost[] = await summarizeConversations(allConversations, existingTopics);
+
+  // 5. Claude 대화 processed: true (초안 생성 여부 무관하게 처리 완료 표시)
+  const claudeIds: number[] = (convRows ?? []).map((row) => row.id);
+  if (claudeIds.length > 0) {
+    await supabase.from("conversations").update({ processed: true }).in("id", claudeIds);
+    console.log(`✅ ${claudeIds.length}개 대화 processed 처리`);
   }
 
-  // Notion 초안
-  const notionDrafts = await summarizeConversations(notionConversations);
-  allDrafts.push(...notionDrafts);
-
   if (allDrafts.length === 0) {
-    console.log("생성된 초안 없음");
+    console.log("생성된 초안 없음 (블로그 가치 있는 인사이트 없음)");
     return;
   }
 
-  // 4. Supabase draft_posts 저장 (conversation_data 포함)
-  console.log("\n=== 4단계: 초안 저장 ===");
+  // 6. Supabase draft_posts 저장
+  console.log("\n=== 5단계: 초안 저장 ===");
   const rows = allDrafts.map((draft) => ({
     title: draft.title,
     description: draft.description,
@@ -83,12 +85,6 @@ async function main() {
 
   const { error: insertError } = await supabase.from("draft_posts").insert(rows);
   if (insertError) throw insertError;
-
-  // 5. 성공한 Claude 대화만 processed: true
-  if (successfulIds.length > 0) {
-    await supabase.from("conversations").update({ processed: true }).in("id", successfulIds);
-    console.log(`✅ ${successfulIds.length}개 대화 processed 처리 (실패한 ${(convRows ?? []).length - successfulIds.length}개는 재시도 대상)`);
-  }
 
   console.log(`\n✨ ${allDrafts.length}개 초안 생성 완료! 블로그 /admin/drafts 에서 확인해봐~`);
 }

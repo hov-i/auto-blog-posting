@@ -1,5 +1,4 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { jsonrepair } from "jsonrepair";
 import { ProjectConversation } from "./collect.js";
 
 export interface DraftPost {
@@ -8,7 +7,21 @@ export interface DraftPost {
   content: string;
   tags: string[];
   sourceProject: string;
-  conversation?: ProjectConversation; // 재생성용 소스 대화
+  conversation?: ProjectConversation;
+}
+
+interface Insight {
+  topic: string;
+  summary: string;
+  techStack: string[];
+  sourceProject: string;
+  excerpt: string; // 대화에서 뽑은 핵심 발췌
+}
+
+interface InsightCluster {
+  theme: string;
+  angle: string; // 어떤 방향의 글로 쓸지
+  insights: Insight[];
 }
 
 const client = new Anthropic({
@@ -30,53 +43,22 @@ const BLOG_STYLE_TEMPLATE = `
 
 구조:
 1. 맨 첫 줄: > 블록쿼트로 이 글을 쓰게 된 계기/맥락 1~2문장
-   예시: > 사이드 프로젝트를 마무리하면서 팀원들과 함께한 시간을 기록으로 남기고 싶어 이 글을 쓰게 되었다.
 2. 빈 줄 하나 띄운 뒤 ## 헤더로 섹션 구분
 3. 기술 선택은 "왜 선택했는지", "어떤 점이 좋았는지" 위주로 풀어서 설명
 4. 이슈/문제는 솔직하게 언급 후 어떻게 해결했는지 공유
-5. 팀/협업 경험이면 팀원에 대한 감사함 자연스럽게 녹이기
-6. 마지막: 회고 또는 앞으로의 계획으로 마무리 (희망적인 톤)
-7. > 인용문으로 핵심 인사이트 강조 (선택)
-
-예시 마무리 톤:
-"팀원 모두 각자의 자리에서 최선을 다해줘서 정말 고마웠다. 짧지 않은 기간 동안 서로 의지하며 달려온 시간들이..."
-"추후에는 기능 개선 사항을 반영하면서 고도화 작업 및 성능 최적화를 진행해보려한다."
+5. 마지막: 회고 또는 앞으로의 계획으로 마무리 (희망적인 톤)
 
 ---
 
 ### 글 유형 2: 기술 학습 정리 글 (개념 공부, 라이브러리 분석, 트러블슈팅)
 
 구조:
-1. 맨 첫 줄: > 블록쿼트로 이 글을 쓰게 된 상황 설명 + 왜 쓰게 됐는지 동기
-   예시: > Recoil에 대해 공부하다가 Concurrent Mode라는 것을 접하게 되었다. 동시성 모드가 어떤 건지 의문점이 들어 이 글을 작성하게 되었다.
-2. 빈 줄 하나 띄운 뒤 # 헤더로 첫 번째 섹션 시작 (## 아님, 반드시 # 사용)
-3. 각 섹션은 # 헤더 + 설명 (bullet point, 코드블록 등 활용)
-4. 글의 흐름은 "개념 소개 → 상세 설명 → 비교/분석 → 결론" 순서로
-5. 코드 예시는 언어 명시한 코드블록으로
-6. 비교/분석은 각 항목을 bullet point로 나열
-7. 마지막 섹션은 반드시 # 마치며
-   - 공부하면서 깨달은 점
-   - 앞으로 어떻게 적용할지
-   예시 톤: "지금 보니 ~라는 것을 깨닫게 되었다.", "앞으로 애플리케이션을 개발하면서 큰 도움이 될 것 같다."
-8. 참고한 URL이 있으면 # 마치며 아래에 #### Reference 로 링크 목록 추가
-   예시:
-   #### Reference
-   [링크 제목 - 출처](URL)
-
-예시 전체 구조:
-> (동기/계기 설명)
-
-# 첫 번째 개념
-- 설명...
-
-# 두 번째 개념
-- 설명...
-
-# 마치며
-느낀 점과 마무리 멘트...
-
-#### Reference
-[참고 링크](URL)
+1. 맨 첫 줄: > 블록쿼트로 이 글을 쓰게 된 상황 설명
+2. 빈 줄 하나 띄운 뒤 # 헤더로 첫 번째 섹션 시작
+3. 글의 흐름은 "개념 소개 → 상세 설명 → 비교/분석 → 결론" 순서로
+4. 코드 예시는 언어 명시한 코드블록으로
+5. 마지막 섹션은 반드시 # 마치며
+6. 참고 URL 있으면 #### Reference 추가
 
 ---
 
@@ -85,121 +67,310 @@ const BLOG_STYLE_TEMPLATE = `
 - 개념 공부, 라이브러리 비교, 에러 해결, 기술 분석 → 유형 2
 `;
 
-export async function generateDraftPosts(
-  conversation: ProjectConversation,
-): Promise<DraftPost[]> {
-  const conversationText = conversation.messages
-    .map((m) => `[${m.role === "user" ? "나" : "AI"}] ${m.text}`)
-    .join("\n\n");
+// 노이즈 제거 + 길이 압축
+function cleanConversationText(conversation: ProjectConversation): string {
+  const cleaned = conversation.messages
+    .filter((m) => m.text.length > 20)
+    .map((m) => {
+      let text = m.text;
+
+      // 500자 이상 코드블록 압축 (블록 단위로 각각 처리)
+      text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, content) => {
+        if (content.length < 500) return match;
+        return `\`\`\`${lang}\n[코드 블록 생략]\n\`\`\``;
+      });
+
+      if (text.length > 2000) {
+        text = text.slice(0, 1500) + "\n...(생략)";
+      }
+
+      return `[${m.role === "user" ? "나" : "AI"}] ${text}`;
+    });
+
+  const MAX = 40;
+  const selected =
+    cleaned.length > MAX
+      ? [...cleaned.slice(0, 20), "...(중간 대화 생략)...", ...cleaned.slice(-20)]
+      : cleaned;
+
+  return selected.join("\n\n");
+}
+
+// 1단계: 대화에서 인사이트 추출 (haiku, 병렬)
+async function extractInsights(conversation: ProjectConversation): Promise<Insight[]> {
+  const text = cleanConversationText(conversation);
 
   const res = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 8000,
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 2000,
+    tools: [
+      {
+        name: "extract_insights",
+        description: "대화에서 블로그 가치가 있는 인사이트를 추출한다",
+        input_schema: {
+          type: "object" as const,
+          properties: {
+            insights: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  topic: { type: "string", description: "인사이트 주제 (e.g. React 상태관리, TypeScript 타입 추론)" },
+                  summary: { type: "string", description: "핵심 내용 2~3문장" },
+                  techStack: { type: "array", items: { type: "string" }, description: "관련 기술 스택" },
+                  excerpt: { type: "string", description: "대화에서 가장 핵심적인 발췌 1~2문장" },
+                },
+                required: ["topic", "summary", "techStack", "excerpt"],
+              },
+            },
+          },
+          required: ["insights"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: "extract_insights" },
     messages: [
       {
         role: "user",
-        content: `아래는 "${conversation.projectName}" 프로젝트 개발 중 AI와 나눈 대화야.
-이 대화에서 블로그 포스팅으로 만들 만한 내용을 뽑아서 블로그 글로 작성해줘.
+        content: `아래는 "${conversation.projectName}" 개발 대화야.
+블로그 포스팅에 쓸 만한 인사이트만 뽑아줘.
 
-${BLOG_STYLE_TEMPLATE}
+기준:
+- 새로운 개념/기술 학습
+- 문제 해결 과정, 트러블슈팅
+- 구현 방법, 설계 결정, 기술 비교
+- 단순 코드 수정 요청, 자잘한 버그 수정은 제외
 
-⚠️ content 필드 작성 시 절대 규칙:
-- 글 유형에 상관없이 content의 첫 줄은 반드시 "> " 로 시작하는 blockquote여야 해
-- blockquote에는 이 글을 쓰게 된 계기/동기/맥락을 1~2문장으로 작성
-- 그 다음 빈 줄 하나 띄운 뒤 본문 시작
-- 기술 학습 글: blockquote 다음 # 헤더로 섹션 시작
-- 경험/회고 글: blockquote 다음 ## 헤더로 섹션 시작
+가치 있는 인사이트가 없으면 insights를 빈 배열로 반환해.
 
-올바른 예시:
-"> ~을 공부하다가 ~한 궁금증이 생겨서 이 글을 작성하게 되었다.\\n\\n# 첫 번째 섹션\\n..."
-"> 이번 프로젝트를 마치고 나서 느낀 점들을 기록으로 남기고 싶었다.\\n\\n## 프로젝트 소개\\n..."
-
-잘못된 예시 (절대 이렇게 하면 안 됨):
-"# 첫 번째 섹션\\n..." (> blockquote 없이 바로 시작)
-"이번에 ~을 개발하면서..." (일반 텍스트로 시작)
-
-조건:
-- 개발자 블로그 독자를 대상으로 작성
-- 블로그 글이 1~3개 나올 수 있어 (내용이 여러 주제면 분리)
-- 각 글은 아래 JSON 형식으로 반환
-
-반드시 아래 JSON 배열 형식으로만 응답해. 다른 텍스트 없이:
-[
-  {
-    "title": "글 제목",
-    "description": "한 줄 요약 (미리보기용)",
-    "content": "마크다운 본문 전체",
-    "tags": ["태그1", "태그2"]
-  }
-]
-
-대화 내용:
+대화:
 ---
-${conversationText}
+${text}
 ---`,
       },
     ],
   });
 
-  const text = res.content[0];
-  if (text.type !== "text") return [];
+  const toolUse = res.content.find((c) => c.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") return [];
 
-  try {
-    const raw = text.text.trim();
-    const start = raw.indexOf("[");
-    const end = raw.lastIndexOf("]");
-    if (start === -1 || end === -1) throw new Error("JSON 배열을 찾을 수 없음");
-    const parsed = JSON.parse(jsonrepair(raw.slice(start, end + 1)));
-    return parsed.map(
-      (p: Omit<DraftPost, "sourceProject" | "conversation">) => ({
-        ...p,
-        sourceProject: conversation.projectName,
-        conversation,
-      }),
-    );
-  } catch (e) {
-    console.error(`❌ ${conversation.projectName} JSON 파싱 실패`);
-    console.error("=== 에러 메시지 ===");
-    console.error(e instanceof Error ? e.message : e);
-    console.error("=== 응답 앞부분 ===");
-    console.error(text.text.slice(0, 200));
-    console.error("=== 응답 끝부분 ===");
-    console.error(text.text.slice(-300));
-    console.error("========================");
-    return [];
-  }
+  const input = toolUse.input as { insights: Omit<Insight, "sourceProject">[] };
+  return (input.insights ?? []).map((i) => ({
+    ...i,
+    sourceProject: conversation.projectName,
+  }));
+}
+
+// 2단계: 전체 인사이트를 주제별로 클러스터링 (sonnet, 1회)
+async function clusterInsights(
+  insights: Insight[],
+  existingTopics: string[] = [],
+): Promise<InsightCluster[]> {
+  const insightList = insights
+    .map((i, idx) => `[${idx}] 프로젝트: ${i.sourceProject}\n주제: ${i.topic}\n요약: ${i.summary}\n발췌: ${i.excerpt}`)
+    .join("\n\n");
+
+  const dedupSection = existingTopics.length > 0
+    ? `\n이미 작성된 글 주제 (90% 이상 겹치면 클러스터 제외):\n${existingTopics.map((t) => `- ${t}`).join("\n")}\n`
+    : "";
+
+  const res = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 2000,
+    tools: [
+      {
+        name: "cluster_insights",
+        description: "인사이트들을 블로그 글 주제 단위로 클러스터링한다",
+        input_schema: {
+          type: "object" as const,
+          properties: {
+            clusters: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  theme: { type: "string", description: "클러스터 주제 (블로그 글 제목 방향)" },
+                  angle: { type: "string", description: "어떤 관점/구성으로 글을 쓸지 (e.g. 트러블슈팅 경험, 개념 비교, 구현 회고)" },
+                  insightIndexes: { type: "array", items: { type: "number" }, description: "이 클러스터에 포함되는 인사이트 인덱스 목록" },
+                },
+                required: ["theme", "angle", "insightIndexes"],
+              },
+            },
+          },
+          required: ["clusters"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: "cluster_insights" },
+    messages: [
+      {
+        role: "user",
+        content: `아래는 이번 주 개발 대화에서 추출한 인사이트 목록이야.
+비슷한 주제끼리 묶어서 블로그 글 단위로 클러스터링해줘.
+${dedupSection}
+규칙:
+- 하나의 클러스터 = 하나의 블로그 글
+- 너무 비슷한 건 합치고, 관련 없는 건 분리
+- 인사이트가 1개뿐인 클러스터도 괜찮음
+- 블로그 글로 쓰기 너무 얕은 건 클러스터에서 제외
+
+인사이트 목록:
+${insightList}`,
+      },
+    ],
+  });
+
+  const toolUse = res.content.find((c) => c.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") return [];
+
+  const input = toolUse.input as { clusters: { theme: string; angle: string; insightIndexes: number[] }[] };
+
+  return (input.clusters ?? [])
+    .map((c) => ({
+      theme: c.theme,
+      angle: c.angle,
+      insights: c.insightIndexes.map((i) => insights[i]).filter(Boolean),
+    }))
+    .filter((c) => c.insights.length > 0); // 빈 클러스터 제거
+}
+
+// 3단계: 클러스터 → 블로그 글 생성 (sonnet, 병렬)
+async function generateFromCluster(cluster: InsightCluster): Promise<DraftPost | null> {
+  const insightText = cluster.insights
+    .map((i) => `[${i.sourceProject}]\n주제: ${i.topic}\n내용: ${i.summary}\n발췌: ${i.excerpt}\n기술스택: ${i.techStack.join(", ")}`)
+    .join("\n\n---\n\n");
+
+  const res = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 8000,
+    tools: [
+      {
+        name: "create_blog_post",
+        description: "인사이트 클러스터로 블로그 포스트를 생성한다",
+        input_schema: {
+          type: "object" as const,
+          properties: {
+            title: { type: "string", description: "블로그 글 제목" },
+            description: { type: "string", description: "한 줄 요약 (미리보기용)" },
+            content: { type: "string", description: "마크다운 본문 전체" },
+            tags: { type: "array", items: { type: "string" }, description: "태그 목록" },
+          },
+          required: ["title", "description", "content", "tags"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: "create_blog_post" },
+    messages: [
+      {
+        role: "user",
+        content: `아래 인사이트들을 합쳐서 블로그 글 하나를 작성해줘.
+
+주제: ${cluster.theme}
+글쓰기 방향: ${cluster.angle}
+
+${BLOG_STYLE_TEMPLATE}
+
+⚠️ content 작성 규칙:
+- 첫 줄은 반드시 "> " blockquote로 시작 (이 글을 쓰게 된 계기/동기)
+- 그 다음 빈 줄 하나 띄운 뒤 본문 시작
+- 기술 학습 글: # 헤더, 경험/회고 글: ## 헤더
+
+인사이트:
+---
+${insightText}
+---`,
+      },
+    ],
+  });
+
+  const toolUse = res.content.find((c) => c.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") return null;
+
+  const input = toolUse.input as Omit<DraftPost, "sourceProject">;
+  const sourceProjects = [...new Set(cluster.insights.map((i) => i.sourceProject))];
+
+  return {
+    ...input,
+    sourceProject: sourceProjects.join(", "),
+  };
 }
 
 export async function summarizeConversations(
   conversations: ProjectConversation[],
+  existingTopics: string[] = [],
 ): Promise<DraftPost[]> {
   if (conversations.length === 0) {
     console.log("📭 이번 주 수집된 대화가 없어요!");
     return [];
   }
 
-  console.log(`\n⚡ ${conversations.length}개 대화 병렬 처리 시작...`);
+  // 1단계: 모든 대화에서 인사이트 병렬 추출
+  console.log(`\n🔍 1단계: ${conversations.length}개 대화에서 인사이트 추출 중...`);
+  const insightResults = await Promise.allSettled(
+    conversations.map(async (conv) => {
+      const insights = await extractInsights(conv);
+      console.log(`  ✅ "${conv.projectName}" → ${insights.length}개 인사이트`);
+      return insights;
+    }),
+  );
 
-  const results = await Promise.allSettled(
-    conversations.map(async (conversation) => {
-      console.log(`✍️  "${conversation.projectName}" 요약 중...`);
-      const drafts = await generateDraftPosts(conversation);
-      console.log(
-        `✅ "${conversation.projectName}" ${drafts.length}개 초안 생성!`,
-      );
-      return drafts;
+  const allInsights: Insight[] = [];
+  for (let i = 0; i < insightResults.length; i++) {
+    const result = insightResults[i];
+    if (result.status === "fulfilled") {
+      allInsights.push(...result.value);
+    } else {
+      console.error(`  ❌ "${conversations[i].projectName}" 인사이트 추출 실패:`, result.reason);
+    }
+  }
+
+  if (allInsights.length === 0) {
+    console.log("💡 블로그 가치 있는 인사이트가 없어요!");
+    return [];
+  }
+
+  console.log(`\n📦 총 ${allInsights.length}개 인사이트 수집 완료`);
+
+  // 2단계: 클러스터링
+  console.log(`\n🧩 2단계: 주제별 클러스터링 중...`);
+  const clusters = await clusterInsights(allInsights, existingTopics);
+  console.log(`  ✅ ${clusters.length}개 클러스터 생성`);
+  clusters.forEach((c) => console.log(`  - "${c.theme}" (인사이트 ${c.insights.length}개)`));
+
+  // 3단계: 클러스터별 블로그 글 병렬 생성
+  console.log(`\n✍️  3단계: ${clusters.length}개 블로그 글 생성 중...`);
+  const postResults = await Promise.allSettled(
+    clusters.map(async (cluster) => {
+      const post = await generateFromCluster(cluster);
+      if (post) console.log(`  ✅ "${post.title}" 생성 완료`);
+      return post;
     }),
   );
 
   const allDrafts: DraftPost[] = [];
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      allDrafts.push(...result.value);
-    } else {
-      console.error(`❌ 초안 생성 실패:`, result.reason);
+  for (const result of postResults) {
+    if (result.status === "fulfilled" && result.value) {
+      allDrafts.push(result.value);
     }
   }
 
   console.log(`\n🎉 총 ${allDrafts.length}개 블로그 초안 생성 완료!`);
   return allDrafts;
+}
+
+// 단일 대화 재생성용 (generate.ts에서 사용)
+export async function generateDraftPosts(
+  conversation: ProjectConversation,
+): Promise<DraftPost[]> {
+  const insights = await extractInsights(conversation);
+  if (insights.length === 0) return [];
+
+  const clusters = await clusterInsights(insights);
+  const postResults = await Promise.allSettled(
+    clusters.map((cluster) => generateFromCluster(cluster)),
+  );
+
+  return postResults
+    .filter((r): r is PromiseFulfilledResult<DraftPost> => r.status === "fulfilled" && r.value !== null)
+    .map((r) => ({ ...r.value, conversation }));
 }
