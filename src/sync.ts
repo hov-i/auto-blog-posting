@@ -53,25 +53,51 @@ async function main() {
     return;
   }
 
-  // 이미 동기화된 파일 키 조회
+  // 기존 동기화 파일의 file_key + 메시지 수 조회
   const { data: existing } = await supabase
     .from("conversations")
-    .select("file_key")
+    .select("file_key, messages")
     .eq("source", "claude");
 
-  const syncedKeys = new Set(existing?.map((r) => r.file_key) ?? []);
+  // file_key → 저장된 메시지 수 맵
+  const syncedMap = new Map<string, number>(
+    (existing ?? []).map((r) => [
+      r.file_key as string,
+      Array.isArray(r.messages) ? (r.messages as unknown[]).length : 0,
+    ])
+  );
 
   let synced = 0;
+  let updated = 0;
   let skipped = 0;
 
   for (const { projectName, filePath, fileKey } of files) {
-    if (syncedKeys.has(fileKey)) {
-      skipped++;
+    const messages = parseJsonlFile(filePath);
+    const storedCount = syncedMap.get(fileKey);
+
+    if (storedCount !== undefined) {
+      // 이미 있는 파일 — 메시지 수 비교해서 증가했으면 업데이트
+      if (messages.length <= storedCount) {
+        skipped++;
+        continue;
+      }
+
+      const { error } = await supabase
+        .from("conversations")
+        .update({ messages, processed: false })
+        .eq("file_key", fileKey)
+        .eq("source", "claude");
+
+      if (error) {
+        console.error(`❌ ${fileKey} 업데이트 실패:`, error.message);
+      } else {
+        console.log(`🔄 ${projectName} 업데이트 (${storedCount} → ${messages.length}개 메시지)`);
+        updated++;
+      }
       continue;
     }
 
-    const messages = parseJsonlFile(filePath);
-
+    // 새 파일 — 최소 메시지 수 체크 후 INSERT
     if (messages.length < MIN_MESSAGES) {
       skipped++;
       continue;
@@ -93,7 +119,7 @@ async function main() {
     }
   }
 
-  console.log(`\n📦 ${synced}개 새로 동기화, ${skipped}개 스킵`);
+  console.log(`\n📦 ${synced}개 새로 동기화, ${updated}개 업데이트, ${skipped}개 스킵`);
 }
 
 main().catch((err) => {
