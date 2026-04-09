@@ -3,7 +3,8 @@ import { DraftPost } from "./summarize.js";
 
 function getSupabaseClient() {
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
   if (!url || !key) {
     throw new Error("SUPABASE_URL 또는 SUPABASE_SERVICE_ROLE_KEY가 없어요!");
@@ -26,7 +27,8 @@ export async function uploadDrafts(drafts: DraftPost[]): Promise<void> {
     content: draft.content,
     tags: draft.tags.join(","),
     source_project: draft.sourceProject,
-    status: "draft",
+    conversation_data: draft.conversation ?? null,
+    status: "pending",
     created_at: new Date().toISOString(),
   }));
 

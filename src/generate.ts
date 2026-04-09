@@ -1,4 +1,5 @@
 import "dotenv/config";
+import fs from "fs";
 import { createClient } from "@supabase/supabase-js";
 import { ProjectConversation } from "./collect.js";
 import { DraftPost, summarizeConversations } from "./summarize.js";
@@ -58,20 +59,11 @@ async function main() {
 
   const allDrafts: DraftPost[] = await summarizeConversations(allConversations, existingTopics);
 
-  // 5. Claude 대화 processed: true (초안 생성 여부 무관하게 처리 완료 표시)
-  const claudeIds: number[] = (convRows ?? []).map((row) => row.id);
-  if (claudeIds.length > 0) {
-    await supabase.from("conversations").update({ processed: true }).in("id", claudeIds);
-    console.log(`✅ ${claudeIds.length}개 대화 processed 처리`);
-  }
-
   if (allDrafts.length === 0) {
     console.log("생성된 초안 없음 (블로그 가치 있는 인사이트 없음)");
-    return;
   }
 
-  // 6. Supabase draft_posts 저장
-  console.log("\n=== 5단계: 초안 저장 ===");
+  // 5. Supabase draft_posts 저장 (초안이 있을 때만)
   const rows = allDrafts.map((draft) => ({
     title: draft.title,
     description: draft.description,
@@ -83,10 +75,34 @@ async function main() {
     created_at: new Date().toISOString(),
   }));
 
-  const { error: insertError } = await supabase.from("draft_posts").insert(rows);
-  if (insertError) throw insertError;
+  if (rows.length > 0) {
+    console.log("\n=== 5단계: 초안 저장 ===");
+    const { error: insertError } = await supabase.from("draft_posts").insert(rows);
+    if (insertError) throw insertError;
+    console.log(`\n✨ ${allDrafts.length}개 초안 생성 완료! 블로그 /admin/drafts 에서 확인해봐~`);
+  }
 
-  console.log(`\n✨ ${allDrafts.length}개 초안 생성 완료! 블로그 /admin/drafts 에서 확인해봐~`);
+  // 6. Claude 대화 processed: true (draft 저장 성공 후)
+  const claudeIds: number[] = (convRows ?? []).map((row) => row.id);
+  if (claudeIds.length > 0) {
+    await supabase.from("conversations").update({ processed: true }).in("id", claudeIds);
+    console.log(`✅ ${claudeIds.length}개 대화 processed 처리`);
+  }
+
+  // GitHub Actions Job Summary 출력
+  const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryFile) {
+    const lines = [
+      `## 블로그 초안 자동 생성 결과`,
+      ``,
+      `**${allDrafts.length}개** 초안 생성 완료 🎉`,
+      ``,
+      `| 제목 | 소스 프로젝트 | 태그 |`,
+      `|---|---|---|`,
+      ...rows.map((r) => `| ${r.title} | ${r.source_project} | \`${r.tags}\` |`),
+    ];
+    fs.appendFileSync(summaryFile, lines.join("\n") + "\n");
+  }
 }
 
 main().catch((err) => {

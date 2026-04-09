@@ -13,48 +13,57 @@ function richTextToPlain(richText: RichTextItemResponse[]): string {
   return richText.map((t) => t.plain_text).join("");
 }
 
-// 블록 → 마크다운 변환
+// 블록 → 마크다운 변환 (페이지네이션 처리)
 async function blocksToMarkdown(blockId: string): Promise<string> {
-  const res = await notion.blocks.children.list({ block_id: blockId });
   const lines: string[] = [];
+  let cursor: string | undefined;
 
-  for (const block of res.results) {
-    const b = block as BlockObjectResponse;
+  do {
+    const res = await notion.blocks.children.list({
+      block_id: blockId,
+      start_cursor: cursor,
+      page_size: 100,
+    });
+    cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
 
-    switch (b.type) {
-      case "paragraph":
-        lines.push(richTextToPlain(b.paragraph.rich_text));
-        break;
-      case "heading_1":
-        lines.push(`# ${richTextToPlain(b.heading_1.rich_text)}`);
-        break;
-      case "heading_2":
-        lines.push(`## ${richTextToPlain(b.heading_2.rich_text)}`);
-        break;
-      case "heading_3":
-        lines.push(`### ${richTextToPlain(b.heading_3.rich_text)}`);
-        break;
-      case "bulleted_list_item":
-        lines.push(`- ${richTextToPlain(b.bulleted_list_item.rich_text)}`);
-        break;
-      case "numbered_list_item":
-        lines.push(`1. ${richTextToPlain(b.numbered_list_item.rich_text)}`);
-        break;
-      case "code":
-        lines.push(
-          `\`\`\`${b.code.language}\n${richTextToPlain(b.code.rich_text)}\n\`\`\``
-        );
-        break;
-      case "quote":
-        lines.push(`> ${richTextToPlain(b.quote.rich_text)}`);
-        break;
-      case "divider":
-        lines.push("---");
-        break;
-      default:
-        break;
+    for (const block of res.results) {
+      const b = block as BlockObjectResponse;
+
+      switch (b.type) {
+        case "paragraph":
+          lines.push(richTextToPlain(b.paragraph.rich_text));
+          break;
+        case "heading_1":
+          lines.push(`# ${richTextToPlain(b.heading_1.rich_text)}`);
+          break;
+        case "heading_2":
+          lines.push(`## ${richTextToPlain(b.heading_2.rich_text)}`);
+          break;
+        case "heading_3":
+          lines.push(`### ${richTextToPlain(b.heading_3.rich_text)}`);
+          break;
+        case "bulleted_list_item":
+          lines.push(`- ${richTextToPlain(b.bulleted_list_item.rich_text)}`);
+          break;
+        case "numbered_list_item":
+          lines.push(`1. ${richTextToPlain(b.numbered_list_item.rich_text)}`);
+          break;
+        case "code":
+          lines.push(
+            `\`\`\`${b.code.language}\n${richTextToPlain(b.code.rich_text)}\n\`\`\``,
+          );
+          break;
+        case "quote":
+          lines.push(`> ${richTextToPlain(b.quote.rich_text)}`);
+          break;
+        case "divider":
+          lines.push("---");
+          break;
+        default:
+          break;
+      }
     }
-  }
+  } while (cursor);
 
   return lines.filter((l) => l.trim()).join("\n\n");
 }
@@ -89,13 +98,17 @@ function getWeekRange(): { start: Date; end: Date } {
 }
 
 // 특정 페이지 ID 목록에서 내용 수집
-async function collectFromPages(pageIds: string[]): Promise<ProjectConversation[]> {
+async function collectFromPages(
+  pageIds: string[],
+): Promise<ProjectConversation[]> {
   const { start, end } = getWeekRange();
   const results: ProjectConversation[] = [];
 
   for (const pageId of pageIds) {
     try {
-      const page = await notion.pages.retrieve({ page_id: pageId }) as PageObjectResponse;
+      const page = (await notion.pages.retrieve({
+        page_id: pageId,
+      })) as PageObjectResponse;
       const lastEdited = new Date(page.last_edited_time);
 
       // 이번 주 수정된 페이지만 수집
@@ -130,17 +143,22 @@ async function collectFromPages(pageIds: string[]): Promise<ProjectConversation[
 }
 
 // 데이터베이스에서 이번 주 수정된 항목 수집
-async function collectFromDatabase(databaseId: string): Promise<ProjectConversation[]> {
+async function collectFromDatabase(
+  databaseId: string,
+): Promise<ProjectConversation[]> {
   const { start } = getWeekRange();
   const results: ProjectConversation[] = [];
 
-  const res = await notion.databases.query({
-    database_id: databaseId,
-    filter: {
-      timestamp: "last_edited_time",
-      last_edited_time: { on_or_after: start.toISOString() },
+  const res = (await (notion as any).request({
+    path: `databases/${databaseId}/query`,
+    method: "POST",
+    body: {
+      filter: {
+        timestamp: "last_edited_time",
+        last_edited_time: { on_or_after: start.toISOString() },
+      },
     },
-  });
+  })) as { results: PageObjectResponse[] };
 
   for (const page of res.results) {
     const p = page as PageObjectResponse;
@@ -175,7 +193,10 @@ export async function collectNotionContent(): Promise<ProjectConversation[]> {
   const results: ProjectConversation[] = [];
 
   // 개별 페이지 ID들 (콤마 구분)
-  const pageIds = process.env.NOTION_PAGE_IDS?.split(",").map((id) => id.trim()).filter(Boolean) ?? [];
+  const pageIds =
+    process.env.NOTION_PAGE_IDS?.split(",")
+      .map((id) => id.trim())
+      .filter(Boolean) ?? [];
   if (pageIds.length > 0) {
     console.log(`📄 노션 페이지 ${pageIds.length}개 수집 중...`);
     const pages = await collectFromPages(pageIds);
@@ -183,7 +204,10 @@ export async function collectNotionContent(): Promise<ProjectConversation[]> {
   }
 
   // 데이터베이스 ID들 (콤마 구분)
-  const dbIds = process.env.NOTION_DATABASE_IDS?.split(",").map((id) => id.trim()).filter(Boolean) ?? [];
+  const dbIds =
+    process.env.NOTION_DATABASE_IDS?.split(",")
+      .map((id) => id.trim())
+      .filter(Boolean) ?? [];
   for (const dbId of dbIds) {
     console.log(`🗃️  노션 DB 수집 중...`);
     const items = await collectFromDatabase(dbId);

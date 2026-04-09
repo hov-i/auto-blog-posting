@@ -20,9 +20,20 @@ if ! command -v jq &> /dev/null; then
   exit 1
 fi
 
+# 이미 동일한 커맨드가 등록돼 있는지 체크 (중복 등록 방지)
+ALREADY_EXISTS=$(jq --arg cmd "$HOOK_CMD" \
+  '(.hooks.Stop // []) | map(.hooks // [] | .[].command) | contains([$cmd])' \
+  "$SETTINGS_FILE")
+
+if [ "$ALREADY_EXISTS" = "true" ]; then
+  echo "✅ 이미 등록돼 있어요! 중복 등록 스킵~"
+  exit 0
+fi
+
+# 기존 Stop hooks 보존하면서 append (덮어쓰지 않음)
 UPDATED=$(jq \
   --arg cmd "$HOOK_CMD" \
-  '.hooks.Stop = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]' \
+  '.hooks.Stop = ((.hooks.Stop // []) + [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}])' \
   "$SETTINGS_FILE")
 
 echo "$UPDATED" > "$SETTINGS_FILE"
