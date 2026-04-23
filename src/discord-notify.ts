@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { createClient } from "@supabase/supabase-js";
 
 const DISCORD_API = "https://discord.com/api/v10";
 
@@ -6,6 +7,13 @@ function discordHeaders() {
   const token = process.env.DISCORD_BOT_TOKEN;
   if (!token) throw new Error("DISCORD_BOT_TOKEN 없음");
   return { Authorization: `Bot ${token}`, "Content-Type": "application/json" };
+}
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error("Supabase 환경변수 없음");
+  return createClient(url, key);
 }
 
 async function main() {
@@ -41,8 +49,23 @@ async function main() {
   );
 
   if (!threadRes.ok) throw new Error(`스레드 생성 실패: ${threadRes.status} ${await threadRes.text()}`);
+  const thread = (await threadRes.json()) as { id: string };
 
-  console.log(`✅ Discord 스레드 생성 완료: "${title}"`);
+  // 3. Supabase experience_threads에 저장 (collect-discord가 수집할 수 있도록)
+  const supabase = getSupabase();
+  const { error } = await supabase.from("experience_threads").upsert(
+    {
+      event_title: title,
+      calendar_event_id: `${title}_${Date.now()}`,
+      discord_thread_id: thread.id,
+      discord_channel_id: channelId,
+    },
+    { onConflict: "discord_thread_id", ignoreDuplicates: true },
+  );
+
+  if (error) throw new Error(`experience_threads 저장 실패: ${error.message}`);
+
+  console.log(`✅ Discord 스레드 생성 완료: "${title}" (${thread.id})`);
 }
 
 main().catch((err) => {
