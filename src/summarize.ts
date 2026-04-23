@@ -153,18 +153,26 @@ async function extractInsights(
     messages: [
       {
         role: "user",
-        content: `"${conversation.projectName}" 개발 대화에서 블로그에 쓸 인사이트를 추출해.
+        content: `"${conversation.projectName}" 에서 블로그에 쓸 인사이트를 추출해.
 
 **읽기 전 전처리**: ANSI 코드, 프로그레스 바, 파일 목록(ls/find 결과), 반복 빌드 로그는 노이즈로 간주하고 무시해.
 
-**추출 가치 판단** — 아래 중 하나라도 없으면 빈 배열 반환:
+**추출 가치 판단** — 아래 중 하나라도 해당하면 인사이트 추출:
+
+[기술 대화 기준]
 - 실질 대화 10턴 이상 (짧은 문답은 제외)
 - 시도 → 실패 → 해결로 이어지는 문제 해결 과정
 - 다른 개발자에게도 쓸모 있는 개념/판단/비교
 
+[경험 후기 기준] (discord-experience 소스인 경우)
+- 직접 방문/참여한 장소·이벤트·컨퍼런스에 대한 구체적인 묘사
+- 개발 문화, 팀 구성, 기술 스택 등 개발자 관점의 인사이트
+- 다른 개발자에게 참고가 될 경험 (오피스 투어, 세미나, 해커톤 등)
+- 분량이 짧아도 구체적인 내용이 있으면 가치 있음
+
 **인사이트 기준** (위 조건 충족 시):
-- 포함: 기술 개념 학습, 설계 결정 이유, 트러블슈팅 과정, 라이브러리/방법론 비교
-- 제외: 오타·설정값·자잘한 버그 수정처럼 맥락 없이 끝나는 것
+- 포함: 기술 개념 학습, 설계 결정 이유, 트러블슈팅, 라이브러리 비교, 현장 경험 후기
+- 제외: 오타·설정값·자잘한 버그 수정, "좋았다" 한 줄처럼 내용이 없는 것
 
 대화:
 ---
@@ -392,6 +400,59 @@ async function runInBatches<T, R>(
   return results;
 }
 
+// 경험 후기 전용 블로그 생성 (필터링 없이 바로 생성)
+async function generateFromExperience(
+  conversation: ProjectConversation,
+): Promise<DraftPost | null> {
+  const text = conversation.messages.map((m) => m.text).join("\n\n");
+
+  const res = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 8000,
+    tools: [
+      {
+        name: "create_blog_post",
+        description: "경험 후기를 블로그 포스트로 생성한다",
+        input_schema: {
+          type: "object" as const,
+          properties: {
+            title: { type: "string", description: "블로그 글 제목" },
+            description: { type: "string", description: "한 줄 요약 (미리보기용)" },
+            content: { type: "string", description: "마크다운 본문 전체" },
+            tags: { type: "array", items: { type: "string" }, description: "태그 목록" },
+          },
+          required: ["title", "description", "content", "tags"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: "create_blog_post" },
+    messages: [
+      {
+        role: "user",
+        content: `아래는 내가 직접 경험하고 남긴 후기야. 이걸 블로그 글로 만들어줘.
+
+${BLOG_STYLE_TEMPLATE}
+
+⚠️ content 작성 규칙:
+- 첫 줄은 반드시 "> " blockquote로 시작 (이 글을 쓰게 된 계기/동기)
+- 경험/회고 글 유형으로 작성 (## 헤더 사용)
+- 1인칭 경험담으로, 솔직하고 구체적으로
+
+후기 내용:
+---
+${text}
+---`,
+      },
+    ],
+  });
+
+  const toolUse = res.content.find((c) => c.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") return null;
+
+  const input = toolUse.input as Omit<DraftPost, "sourceProject" | "conversation">;
+  return { ...input, sourceProject: conversation.projectName, conversation };
+}
+
 export async function summarizeConversations(
   conversations: ProjectConversation[],
   existingTopics: string[] = [],
@@ -401,11 +462,41 @@ export async function summarizeConversations(
     return [];
   }
 
-  // 1단계: 모든 대화에서 인사이트 병렬 추출 (최대 5개 동시)
-  console.log(
-    `\n🔍 1단계: ${conversations.length}개 대화에서 인사이트 추출 중...`,
+  // 경험 후기 / 기술 대화 분리
+  const experienceConvs = conversations.filter((c) =>
+    c.projectName.startsWith("discord-experience-"),
   );
-  const insightResults = await runInBatches(conversations, 5, async (conv) => {
+  const techConvs = conversations.filter(
+    (c) => !c.projectName.startsWith("discord-experience-"),
+  );
+
+  const allDrafts: DraftPost[] = [];
+
+  // 경험 후기 → 필터링 없이 바로 블로그 생성
+  if (experienceConvs.length > 0) {
+    console.log(`\n🌟 경험 후기 ${experienceConvs.length}개 블로그 생성 중...`);
+    const expResults = await runInBatches(experienceConvs, 3, async (conv) => {
+      const post = await generateFromExperience(conv);
+      if (post) console.log(`  ✅ "${post.title}" 생성 완료`);
+      return post;
+    });
+    for (const result of expResults) {
+      if (result.status === "fulfilled" && result.value) {
+        allDrafts.push(result.value);
+      }
+    }
+  }
+
+  if (techConvs.length === 0) {
+    console.log(`\n🎉 총 ${allDrafts.length}개 블로그 초안 생성 완료!`);
+    return allDrafts;
+  }
+
+  // 1단계: 기술 대화에서 인사이트 병렬 추출 (최대 5개 동시)
+  console.log(
+    `\n🔍 1단계: ${techConvs.length}개 기술 대화에서 인사이트 추출 중...`,
+  );
+  const insightResults = await runInBatches(techConvs, 5, async (conv) => {
     const insights = await extractInsights(conv);
     console.log(`  ✅ "${conv.projectName}" → ${insights.length}개 인사이트`);
     return insights;
@@ -460,7 +551,6 @@ export async function summarizeConversations(
     return post;
   });
 
-  const allDrafts: DraftPost[] = [];
   for (const result of postResults) {
     if (result.status === "fulfilled" && result.value) {
       allDrafts.push(result.value);
