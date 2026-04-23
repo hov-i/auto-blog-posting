@@ -5,6 +5,7 @@ interface ExperienceRow {
   id: number;
   channel_id: string;
   content: string;
+  image_urls: string[] | null;
   calendar_event_title: string | null;
   created_at: string;
 }
@@ -24,7 +25,7 @@ export async function collectExperiences(): Promise<{
 
   const { data, error } = await supabase
     .from("experiences")
-    .select("id, channel_id, content, calendar_event_title, created_at")
+    .select("id, channel_id, content, image_urls, calendar_event_title, created_at")
     .eq("processed", false)
     .order("created_at", { ascending: true });
 
@@ -48,13 +49,18 @@ export async function collectExperiences(): Promise<{
   const conversations: ProjectConversation[] = [];
 
   for (const [channelId, channelRows] of grouped) {
-    const messages: Message[] = channelRows.map((r) => ({
-      role: "user" as const,
-      text: r.calendar_event_title
-        ? `[${r.calendar_event_title} 후기]\n${r.content}`
-        : r.content,
-      timestamp: r.created_at,
-    }));
+    const messages: Message[] = channelRows.map((r) => {
+      const imageSection =
+        r.image_urls && r.image_urls.length > 0
+          ? `\n\n[첨부 이미지]\n${r.image_urls.map((url) => `![이미지](${url})`).join("\n")}`
+          : "";
+
+      const text = r.calendar_event_title
+        ? `[${r.calendar_event_title} 후기]\n${r.content}${imageSection}`
+        : `${r.content}${imageSection}`;
+
+      return { role: "user" as const, text, timestamp: r.created_at };
+    });
 
     conversations.push({
       projectName: `discord-experience-${channelId}`,

@@ -1,7 +1,8 @@
 import "dotenv/config";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 const DISCORD_API = "https://discord.com/api/v10";
+const IMAGE_BUCKET = "experience-images";
 
 function discordHeaders() {
   const token = process.env.DISCORD_BOT_TOKEN;
@@ -9,11 +10,17 @@ function discordHeaders() {
   return { Authorization: `Bot ${token}`, "Content-Type": "application/json" };
 }
 
+interface DiscordAttachment {
+  url: string;
+  content_type?: string;
+}
+
 interface DiscordMessage {
   id: string;
   content: string;
   author: { bot?: boolean };
   timestamp: string;
+  attachments: DiscordAttachment[];
 }
 
 async function fetchThreadMessages(
@@ -31,6 +38,36 @@ async function fetchThreadMessages(
   return res.json() as Promise<DiscordMessage[]>;
 }
 
+// Discord 이미지 → Supabase Storage 업로드
+async function uploadImageToSupabase(
+  imageUrl: string,
+  messageId: string,
+  supabase: SupabaseClient,
+): Promise<string | null> {
+  const res = await fetch(imageUrl);
+  if (!res.ok) return null;
+
+  const buffer = await res.arrayBuffer();
+  const contentType = res.headers.get("content-type") ?? "image/jpeg";
+  const ext = contentType.split("/")[1]?.split(";")[0] ?? "jpg";
+  const filename = `${messageId}_${Date.now()}.${ext}`;
+
+  const { error } = await supabase.storage
+    .from(IMAGE_BUCKET)
+    .upload(filename, buffer, { contentType, upsert: true });
+
+  if (error) {
+    console.error("이미지 업로드 실패:", error.message);
+    return null;
+  }
+
+  const { data: { publicUrl } } = supabase.storage
+    .from(IMAGE_BUCKET)
+    .getPublicUrl(filename);
+
+  return publicUrl;
+}
+
 function getSupabase() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
@@ -46,7 +83,6 @@ export async function syncDiscordExperiences(): Promise<void> {
 
   const supabase = getSupabase();
 
-  // 생성된 모든 스레드 조회
   const { data: threads, error } = await supabase
     .from("experience_threads")
     .select("discord_thread_id, event_title");
@@ -64,7 +100,6 @@ export async function syncDiscordExperiences(): Promise<void> {
     const threadId = thread.discord_thread_id as string;
     const eventTitle = thread.event_title as string;
 
-    // 마지막으로 저장된 메시지 ID (중복 방지)
     const { data: lastSaved } = await supabase
       .from("experiences")
       .select("discord_message_id")
@@ -75,9 +110,9 @@ export async function syncDiscordExperiences(): Promise<void> {
     const afterId = lastSaved?.[0]?.discord_message_id as string | undefined;
     const messages = await fetchThreadMessages(threadId, afterId);
 
-    // 봇 메시지 제외, 20자 이상 유저 메시지만
+    // 봇 메시지 제외, 텍스트 or 이미지 첨부가 있는 메시지만
     const userMessages = messages.filter(
-      (m) => !m.author.bot && m.content.trim().length > 20,
+      (m) => !m.author.bot && (m.content.trim().length > 20 || m.attachments?.length > 0),
     );
 
     if (userMessages.length === 0) {
@@ -85,14 +120,28 @@ export async function syncDiscordExperiences(): Promise<void> {
       continue;
     }
 
-    const rows = userMessages.map((m) => ({
-      discord_message_id: m.id,
-      channel_id: threadId,
-      content: m.content,
-      calendar_event_title: eventTitle,
-      created_at: m.timestamp,
-      processed: false,
-    }));
+    const rows = await Promise.all(
+      userMessages.map(async (m) => {
+        // 이미지 첨부 → Supabase Storage 업로드
+        const imageUrls: string[] = [];
+        for (const attachment of m.attachments ?? []) {
+          if (attachment.content_type?.startsWith("image/")) {
+            const url = await uploadImageToSupabase(attachment.url, m.id, supabase);
+            if (url) imageUrls.push(url);
+          }
+        }
+
+        return {
+          discord_message_id: m.id,
+          channel_id: threadId,
+          content: m.content,
+          image_urls: imageUrls,
+          calendar_event_title: eventTitle,
+          created_at: m.timestamp,
+          processed: false,
+        };
+      }),
+    );
 
     const { error: insertError } = await supabase.from("experiences").upsert(rows, {
       onConflict: "discord_message_id",
@@ -102,7 +151,8 @@ export async function syncDiscordExperiences(): Promise<void> {
     if (insertError) {
       console.error(`❌ "${eventTitle}" 저장 실패:`, insertError.message);
     } else {
-      console.log(`✅ "${eventTitle}": ${userMessages.length}개 후기 저장`);
+      const imgCount = rows.reduce((sum, r) => sum + r.image_urls.length, 0);
+      console.log(`✅ "${eventTitle}": ${userMessages.length}개 후기, 이미지 ${imgCount}장 저장`);
       totalSaved += userMessages.length;
     }
   }

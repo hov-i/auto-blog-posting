@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS experiences (
   discord_message_id TEXT UNIQUE NOT NULL,
   channel_id TEXT NOT NULL,
   content TEXT NOT NULL,
+  image_urls TEXT[] DEFAULT '{}',      -- Supabase Storage 이미지 URL 목록
   calendar_event_title TEXT,           -- 캘린더 일정과 연결된 경우
   processed BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW()
