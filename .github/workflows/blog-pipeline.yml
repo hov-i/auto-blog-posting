@@ -76,10 +76,13 @@ jobs:
 
   # 매주 월요일: 블로그 초안 생성
   generate:
+    needs: [collect]
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'schedule' && github.event.schedule == '0 0 * * 1' ||
-      github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'generate' || github.event.inputs.job == 'all')
+      always() && (
+        github.event_name == 'schedule' && github.event.schedule == '0 0 * * 1' ||
+        github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'generate' || github.event.inputs.job == 'all')
+      ) && (needs.collect.result == 'success' || needs.collect.result == 'skipped')
 
     steps:
       - name: Checkout
