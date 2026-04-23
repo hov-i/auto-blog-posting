@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { ProjectConversation } from "./collect.js";
 import { DraftPost, summarizeConversations } from "./summarize.js";
 import { collectNotionContent } from "./collect-notion.js";
+import { collectExperiences } from "./collect-experiences.js";
 
 function getSupabaseClient() {
   const url = process.env.SUPABASE_URL;
@@ -33,7 +34,16 @@ async function main() {
   console.log("\n=== 2단계: Notion 수집 ===");
   const notionConversations = await collectNotionContent();
 
-  if ((convRows ?? []).length === 0 && notionConversations.length === 0) {
+  // 3. Discord 경험 수집
+  console.log("\n=== 3단계: Discord 경험 수집 ===");
+  const { conversations: experienceConversations, ids: experienceIds } =
+    await collectExperiences();
+
+  if (
+    (convRows ?? []).length === 0 &&
+    notionConversations.length === 0 &&
+    experienceConversations.length === 0
+  ) {
     console.log("처리할 대화가 없어요!");
     return;
   }
@@ -55,7 +65,7 @@ async function main() {
     projectName: row.project_name,
     messages: row.messages,
   }));
-  const allConversations = [...claudeConversations, ...notionConversations];
+  const allConversations = [...claudeConversations, ...notionConversations, ...experienceConversations];
 
   const allDrafts: DraftPost[] = await summarizeConversations(allConversations, existingTopics);
 
@@ -82,11 +92,16 @@ async function main() {
     console.log(`\n✨ ${allDrafts.length}개 초안 생성 완료! 블로그 /admin/drafts 에서 확인해봐~`);
   }
 
-  // 6. Claude 대화 processed: true (draft 저장 성공 후)
+  // 6. processed: true 처리
   const claudeIds: number[] = (convRows ?? []).map((row) => row.id);
   if (claudeIds.length > 0) {
     await supabase.from("conversations").update({ processed: true }).in("id", claudeIds);
     console.log(`✅ ${claudeIds.length}개 대화 processed 처리`);
+  }
+
+  if (experienceIds.length > 0) {
+    await supabase.from("experiences").update({ processed: true }).in("id", experienceIds);
+    console.log(`✅ ${experienceIds.length}개 Discord 경험 processed 처리`);
   }
 
   // GitHub Actions Job Summary 출력

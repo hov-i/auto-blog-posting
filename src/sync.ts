@@ -9,7 +9,8 @@ const MIN_MESSAGES = 5; // 너무 짧은 대화 스킵
 
 function getSupabaseClient() {
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
   if (!url || !key) throw new Error("SUPABASE_URL 또는 KEY가 없어요!");
   return createClient(url, key);
 }
@@ -18,7 +19,8 @@ function getAllConversationFiles() {
   const projectsDir = path.join(os.homedir(), ".claude", "projects");
   if (!fs.existsSync(projectsDir)) return [];
 
-  const result: { projectName: string; filePath: string; fileKey: string }[] = [];
+  const result: { projectName: string; filePath: string; fileKey: string }[] =
+    [];
 
   const projectDirs = fs
     .readdirSync(projectsDir)
@@ -28,7 +30,9 @@ function getAllConversationFiles() {
     const parts = projectDir.split("-");
     const projectName = parts.slice(3).join("-") || projectDir;
     const projectPath = path.join(projectsDir, projectDir);
-    const jsonlFiles = fs.readdirSync(projectPath).filter((f) => f.endsWith(".jsonl"));
+    const jsonlFiles = fs
+      .readdirSync(projectPath)
+      .filter((f) => f.endsWith(".jsonl"));
 
     for (const file of jsonlFiles) {
       result.push({
@@ -64,7 +68,7 @@ async function main() {
     (existing ?? []).map((r) => [
       r.file_key as string,
       Array.isArray(r.messages) ? (r.messages as unknown[]).length : 0,
-    ])
+    ]),
   );
 
   let synced = 0;
@@ -91,7 +95,9 @@ async function main() {
       if (error) {
         console.error(`❌ ${fileKey} 업데이트 실패:`, error.message);
       } else {
-        console.log(`🔄 ${projectName} 업데이트 (${storedCount} → ${messages.length}개 메시지)`);
+        console.log(
+          `🔄 ${projectName} 업데이트 (${storedCount} → ${messages.length}개 메시지)`,
+        );
         updated++;
       }
       continue;
@@ -119,7 +125,9 @@ async function main() {
     }
   }
 
-  console.log(`\n📦 ${synced}개 새로 동기화, ${updated}개 업데이트, ${skipped}개 스킵`);
+  console.log(
+    `\n📦 ${synced}개 새로 동기화, ${updated}개 업데이트, ${skipped}개 스킵`,
+  );
 }
 
 main().catch((err) => {

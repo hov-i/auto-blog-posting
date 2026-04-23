@@ -5,10 +5,14 @@
   "main": "dist/index.js",
   "scripts": {
     "sync": "tsx src/sync.ts",
-    "generate": "tsx src/generate.ts"
+    "generate": "tsx src/generate.ts",
+    "collect:discord": "tsx src/collect-discord.ts",
+    "collect:calendar": "tsx src/collect-calendar.ts",
+    "discord:notify": "tsx src/discord-notify.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
+    "googleapis": "^144.0.0",
     "@notionhq/client": "^5.15.0",
     "@supabase/supabase-js": "^2.49.4",
     "dotenv": "^16.4.7",

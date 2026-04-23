@@ -2,12 +2,84 @@ name: 블로그 초안 자동 생성
 
 on:
   schedule:
-    - cron: '0 0 * * 1' # 매주 월요일 오전 9시 KST (UTC 0:00)
-  workflow_dispatch: # 수동 실행 가능
+    - cron: '0 0 * * 1'  # 매주 월요일 오전 9시 KST (UTC 0:00) — 초안 생성
+    - cron: '0 * * * *'   # 매시간 — Discord 수집
+  repository_dispatch:
+    types: [calendar-event-ended]  # Apps Script → 캘린더 일정 종료 시 트리거
+  workflow_dispatch:
+    inputs:
+      job:
+        description: '실행할 job (all / collect / generate)'
+        required: false
+        default: 'all'
+
+env:
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+  NOTION_PAGE_IDS: ${{ secrets.NOTION_PAGE_IDS }}
+  NOTION_DATABASE_IDS: ${{ secrets.NOTION_DATABASE_IDS }}
+  DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+  DISCORD_EXPERIENCE_CHANNEL_IDS: ${{ secrets.DISCORD_EXPERIENCE_CHANNEL_IDS }}
+  GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+  GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+  GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+  GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
 
 jobs:
+  # 캘린더 일정 종료 시: Discord 스레드 생성 (Apps Script가 트리거)
+  discord-notify:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'calendar-event-ended'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: Discord 스레드 생성
+        run: npm run discord:notify
+        env:
+          EVENT_TITLE: ${{ github.event.client_payload.title }}
+
+  # 매시간: Discord 스레드 메시지 수집
+  collect:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' && github.event.schedule == '0 * * * *' ||
+      github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'collect' || github.event.inputs.job == 'all')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: 의존성 설치
+        run: npm ci
+
+      - name: Discord 경험 수집
+        run: npm run collect:discord
+
+  # 매주 월요일: 블로그 초안 생성
   generate:
     runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' && github.event.schedule == '0 0 * * 1' ||
+      github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'generate' || github.event.inputs.job == 'all')
 
     steps:
       - name: Checkout
@@ -24,10 +96,3 @@ jobs:
 
       - name: 블로그 초안 생성
         run: npm run generate
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_PAGE_IDS: ${{ secrets.NOTION_PAGE_IDS }}
-          NOTION_DATABASE_IDS: ${{ secrets.NOTION_DATABASE_IDS }}

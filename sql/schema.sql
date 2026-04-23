@@ -25,7 +25,36 @@ ALTER TABLE draft_posts
 UPDATE draft_posts SET status = 'pending' WHERE status = 'draft';
 
 -- =============================================
--- 3. 블로그 UI용 조회 뷰 (선택)
+-- 3. experiences 테이블 (Discord 경험 기록)
+-- =============================================
+CREATE TABLE IF NOT EXISTS experiences (
+  id BIGSERIAL PRIMARY KEY,
+  discord_message_id TEXT UNIQUE NOT NULL,
+  channel_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  calendar_event_title TEXT,           -- 캘린더 일정과 연결된 경우
+  processed BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS experiences_processed_idx ON experiences (processed);
+
+-- =============================================
+-- 4. experience_threads 테이블 (봇이 생성한 스레드 추적)
+-- =============================================
+CREATE TABLE IF NOT EXISTS experience_threads (
+  id BIGSERIAL PRIMARY KEY,
+  event_title TEXT NOT NULL,
+  calendar_event_id TEXT UNIQUE NOT NULL,  -- 중복 스레드 방지
+  discord_thread_id TEXT UNIQUE NOT NULL,
+  discord_channel_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE experience_threads ENABLE ROW LEVEL SECURITY;
+
+-- =============================================
+-- 5. 블로그 UI용 조회 뷰 (선택)
 -- =============================================
 CREATE OR REPLACE VIEW pending_drafts AS
   SELECT id, title, description, tags, source_project, created_at
