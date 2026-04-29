@@ -1,6 +1,11 @@
 # Auto Blog Posting Pipeline
 
-Claude Code 대화 로그, Notion 글, Discord 경험 후기를 자동으로 블로그 초안으로 변환하는 파이프라인.
+Claude Code 대화 로그, Notion 글, Discord 경험 후기를 블로그 초안으로 변환하는 파이프라인.
+
+**핵심 아이디어**
+- 기술 대화/Notion → **주제(클러스터)별 누적** → 어드민에서 "이 주제로 발제" 누르는 시점에 본문 생성
+- Discord 경험 후기 → 1:1 직접 draft 생성 (별도 파이프라인)
+- 매주 글이 자동 양산되어 같은 주제가 파편화되던 문제 해결
 
 ---
 
@@ -32,29 +37,36 @@ flowchart TD
     E -->|데이터 축적| F
     EX -->|데이터 축적| F
 
-    subgraph STEP2["STEP 2 · 생성 — GitHub Actions · 주 1회 or 수동"]
+    subgraph STEP2["STEP 2 · 누적/생성 — GitHub Actions · 주 1회 or 수동"]
         F([매주 월요일 09:00 KST\nor workflow_dispatch])
         F --> G[generate.ts 실행]
-        G --> G1[기존 draft_posts 주제 조회\n중복 방지용]
         G --> H[(conversations\nprocessed: false 조회)]
         G --> I[Notion API\n이번 주 수정 글 수집]
         G --> EXQ[(experiences\nprocessed: false 조회)]
 
-        EXQ --> EXPIPE["경험 후기 파이프라인\n필터링 없이 바로 글 생성\nclaude-sonnet-4-6"]
-        H --> J["1단계: 인사이트 추출\nclaude-haiku-4-5 병렬"]
+        EXQ --> EXPIPE["Discord 경험 파이프라인\n1:1 직접 글 생성\nclaude-sonnet-4-6"]
+        EXPIPE --> M[(draft_posts\nstatus: pending)]
+
+        H --> J["인사이트 추출\nclaude-haiku-4-5 병렬"]
         I --> J
-        J --> K["2단계: 주제별 클러스터링 + 품질 점수\nclaude-sonnet-4-6 1회"]
-        G1 --> K
-        K --> K2{품질 점수 3 이상?}
-        K2 -->|미만| D2[스킵]
-        K2 -->|이상| L["3단계: 블로그 글 생성\nclaude-sonnet-4-6 병렬"]
-        L --> M[(draft_posts\nstatus: pending)]
-        EXPIPE --> M
+        J --> PF["1차 필터: techStack 교집합\n후보 cluster top-8 선별"]
+        PF --> MERGE["머지 판단\nclaude-sonnet-4-6 1회\n→ 기존 합치기 / 새 클러스터"]
+        MERGE --> TC[(topic_clusters\nis_drafted: false)]
     end
 
+    TC --> ADM
     M --> O
 
-    subgraph STEP3["STEP 3 · 리뷰 — 블로그 UI · 비선형"]
+    subgraph STEP3A["STEP 3-A · 주제 발제 — admin · 온디맨드"]
+        ADM([/admin/topics 접속])
+        ADM --> ADM1[클러스터 후보 목록]
+        ADM1 -->|"이 주제로 발제"| API[Vercel /api/generate-from-cluster]
+        API --> GEN["claude-sonnet-4-6\n저장된 insights로 본문 생성"]
+        GEN --> M
+        API --> TCU["topic_clusters\nis_drafted = true\n(목록에서 숨김)"]
+    end
+
+    subgraph STEP3B["STEP 3-B · draft 검토 — admin"]
         O([/admin/drafts 접속])
         O --> P[초안 목록 확인]
         P --> Q{선택}
@@ -160,19 +172,25 @@ flowchart LR
         B[("conversations\n─────────\nproject_name / file_key\nmessages\nprocessed")]
         EX[("experiences\n─────────\ndiscord_message_id\ncontent / image_urls\ncalendar_event_title\nprocessed")]
         ET[("experience_threads\n─────────\nevent_title\ndiscord_thread_id")]
+        TC[("topic_clusters\n─────────\ntheme / angle / insights\ntech_stack / quality_score\nis_drafted / last_updated_at")]
         C[("draft_posts\n─────────\ntitle / content\ntags / description\nconversation_data\nstatus: pending")]
         IMG[("Storage\nexperience-images")]
     end
 
-    subgraph CLOUD["GitHub Actions"]
+    subgraph CLOUD["GitHub Actions (주 1회 + 매시간)"]
         N["Notion API\n이번 주 수정 글"]
-        D["generate.ts\n기술 대화 파이프라인"]
-        DE["generate.ts\n경험 후기 파이프라인"]
+        D["generate.ts\n기술 대화 → 클러스터 누적"]
+        DE["generate.ts\n경험 후기 → 직접 draft"]
         E["Claude API\nHaiku + Sonnet"]
     end
 
+    subgraph VERCEL["Vercel Function (온디맨드)"]
+        VAPI["api/generate-from-cluster\n클러스터 → 본문 생성"]
+    end
+
     subgraph BLOG["블로그 UI"]
-        F["/admin/drafts\n초안 검토"]
+        F1["/admin/topics\n클러스터 후보"]
+        F2["/admin/drafts\n초안 검토"]
         G["Prisma Posts\n발행됨"]
     end
 
@@ -185,10 +203,15 @@ flowchart LR
     EX -->|"미처리 경험 조회"| DE
     D --> E
     DE --> E
-    E -->|"품질 통과한 것만"| C
-    C -->|"검토"| F
-    F -->|"발제하기"| G
-    F -->|"재생성"| C
+    E -->|"인사이트 누적/머지"| TC
+    E -->|"Discord draft 직접 생성"| C
+    TC -->|"pending 목록"| F1
+    F1 -->|"발제하기"| VAPI
+    VAPI --> E
+    E -->|"본문 생성"| C
+    C -->|"검토"| F2
+    F2 -->|"발제하기"| G
+    F2 -->|"재생성"| C
 ```
 
 ---
@@ -213,9 +236,14 @@ flowchart LR
 |---|---|---|
 | `discord-notify` | `repository_dispatch` (캘린더 일정 종료) | Discord 스레드 생성 |
 | `collect` | 매시간 cron / `workflow_dispatch job=collect\|all` | Discord 메시지 수집 |
-| `generate` | 매주 월요일 cron / `workflow_dispatch job=generate\|all` | 블로그 초안 생성 (`collect` 완료 후 실행) |
+| `generate` | 매주 월요일 cron / `workflow_dispatch job=generate\|all` | 기술 대화 클러스터 누적 + Discord draft 생성 (`collect` 완료 후 실행) |
 
 `job=all`로 수동 실행 시 `collect → generate` 순서 보장 (`needs: [collect]`).
+
+월요일 `generate` job이 하는 일:
+1. Discord 경험 → 1:1 draft 직접 생성 → `draft_posts`에 저장
+2. Claude 대화 + Notion → 인사이트 추출 → 기존 `topic_clusters`에 머지하거나 새 클러스터 생성
+3. **본문 생성은 안 함** — admin이 [Vercel API](#vercel-api-어드민-발제용)를 호출하는 시점까지 대기
 
 ---
 
@@ -226,15 +254,18 @@ auto-blog-posting/
 │
 ├── src/
 │   ├── sync.ts                 # STEP 1-A: 로컬 로그 → Supabase 동기화
-│   ├── generate.ts             # STEP 2: Supabase 대화 + 경험 → 블로그 초안 생성
+│   ├── generate.ts             # STEP 2: 기술 대화 → topic_clusters 누적 / Discord → draft 직접 생성
 │   ├── collect.ts              # 로컬 ~/.claude/projects/ 파일 파싱
 │   ├── collect-notion.ts       # Notion API에서 글 수집
 │   ├── collect-discord.ts      # STEP 1-B: Discord 스레드 메시지 수집 + 이미지 업로드
 │   ├── collect-experiences.ts  # Supabase experiences 조회 → ProjectConversation 변환
 │   ├── discord-notify.ts       # Discord 스레드 생성 + experience_threads 저장
-│   ├── summarize.ts            # 인사이트 추출 + 클러스터링 + 글 생성 (기술 + 경험 분기)
+│   ├── summarize.ts            # 인사이트 추출 + incremental 클러스터링 + 글 생성
 │   ├── upload-drafts.ts        # Supabase draft_posts 저장
 │   └── index.ts                # 로컬 전체 파이프라인 수동 실행용
+│
+├── api/
+│   └── generate-from-cluster.ts # Vercel function: admin이 cluster 선택 시 본문 생성
 │
 ├── apps-script/
 │   └── calendar-discord.gs     # Google Apps Script: 캘린더 감지 → GitHub Actions 트리거
@@ -244,8 +275,9 @@ auto-blog-posting/
 │       └── blog-pipeline.yml   # 3개 job: discord-notify / collect / generate
 │
 ├── sql/
-│   └── schema.sql              # Supabase 테이블 생성 SQL
+│   └── schema.sql              # Supabase 테이블 생성 SQL (topic_clusters 포함)
 │
+├── vercel.json                 # Vercel function 설정
 ├── setup-hook.sh               # Claude Code Stop Hook 등록 스크립트
 └── .env                        # 환경변수 (절대 커밋 금지!)
 ```
@@ -381,6 +413,71 @@ GitHub 레포 → **Actions** 탭 → **블로그 초안 자동 생성** → **R
 | `generate` | 블로그 초안 생성만 |
 
 실행 결과는 Actions → 해당 실행 → **Job Summary**에서 생성된 초안 목록 확인 가능.
+
+---
+
+## Vercel API (어드민 발제용)
+
+`POST /api/generate-from-cluster` — 어드민이 클러스터 하나 선택해서 본문 생성할 때 호출.
+
+```bash
+curl -X POST https://<your-vercel-domain>/api/generate-from-cluster \
+  -H "Authorization: Bearer $GENERATE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"clusterId": 42}'
+```
+
+**응답**
+```json
+{ "draftPostId": 17, "title": "Next.js App Router 도입 회고" }
+```
+
+**동작 순서**
+1. `topic_clusters`에서 `clusterId`로 row 조회 (`is_drafted=true`면 409)
+2. 저장된 insights로 Claude Sonnet 본문 생성
+3. `draft_posts`에 insert (`status: pending`)
+4. 해당 클러스터를 `is_drafted=true`, `drafted_post_id=...`로 마킹
+5. admin은 발제된 draft를 [기존 재생성 흐름](#재생성-동작-방식)으로 검토/발행
+
+**배포**
+```bash
+# 처음 한 번
+npx vercel link
+
+# 환경변수 설정 (Vercel 대시보드에서 또는 CLI)
+npx vercel env add ANTHROPIC_API_KEY production
+npx vercel env add SUPABASE_URL production
+npx vercel env add SUPABASE_SERVICE_ROLE_KEY production
+npx vercel env add GENERATE_API_TOKEN production  # 임의 시크릿 (blog-site와 공유)
+
+npx vercel --prod
+```
+
+`GENERATE_API_TOKEN`은 blog-site 환경변수에도 같은 값으로 등록해서 server action에서 호출할 때 `Authorization: Bearer $TOKEN` 헤더에 실어 보냄.
+
+---
+
+## 어드민 흐름 (blog-site 측 작업 — 별도 레포)
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant UI as /admin/topics
+    participant DB as Supabase topic_clusters
+    participant API as Vercel /api/generate-from-cluster
+    participant Drafts as Supabase draft_posts
+
+    Admin->>UI: /admin/topics 접속
+    UI->>DB: pending_topic_clusters 조회 (is_drafted=false)
+    DB-->>UI: 클러스터 목록 (theme, insight_count, last_updated_at)
+    Admin->>UI: 클러스터 선택 + "발제하기"
+    UI->>API: POST { clusterId }
+    API->>DB: cluster 조회 + insights 사용
+    API->>Drafts: 새 draft insert
+    API->>DB: cluster.is_drafted = true
+    API-->>UI: { draftPostId }
+    UI->>Admin: /admin/drafts/:id 로 이동
+```
 
 ---
 

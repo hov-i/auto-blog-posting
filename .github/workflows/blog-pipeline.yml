@@ -97,5 +97,8 @@ jobs:
       - name: 의존성 설치
         run: npm ci
 
+      - name: Discord 경험 수집 (최신화)
+        run: npm run collect:discord
+
       - name: 블로그 초안 생성
         run: npm run generate

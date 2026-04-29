@@ -8,7 +8,8 @@
     "generate": "tsx src/generate.ts",
     "collect:discord": "tsx src/collect-discord.ts",
     "collect:calendar": "tsx src/collect-calendar.ts",
-    "discord:notify": "tsx src/discord-notify.ts"
+    "discord:notify": "tsx src/discord-notify.ts",
+    "draft": "tsx src/draft-from-cluster.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",

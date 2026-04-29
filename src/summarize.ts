@@ -10,7 +10,7 @@ export interface DraftPost {
   conversation?: ProjectConversation;
 }
 
-interface Insight {
+export interface Insight {
   topic: string;
   summary: string;
   techStack: string[];
@@ -24,6 +24,38 @@ interface InsightCluster {
   angle: string; // 어떤 방향의 글로 쓸지
   insights: Insight[];
   qualityScore: number; // 1-5, 3 미만이면 생성 스킵
+}
+
+// 영속화된 인사이트 (topic_clusters.insights JSONB 안에 저장되는 형태)
+export interface StoredInsight {
+  topic: string;
+  summary: string;
+  techStack: string[];
+  sourceProject: string;
+  excerpt: string;
+}
+
+// topic_clusters DB row
+export interface PendingClusterRow {
+  id: number;
+  theme: string;
+  angle: string | null;
+  quality_score: number;
+  insights: StoredInsight[];
+  source_projects: string[];
+  tech_stack: string[];
+  last_updated_at: string;
+}
+
+export interface MergeResult {
+  existingUpdates: Map<number, Insight[]>; // clusterId -> 새로 합쳐진 인사이트들
+  newClusters: {
+    theme: string;
+    angle: string;
+    qualityScore: number;
+    techStack: string[];
+    insights: Insight[];
+  }[];
 }
 
 const client = new Anthropic({
@@ -579,4 +611,272 @@ export async function generateDraftPosts(
         r.status === "fulfilled" && r.value !== null,
     )
     .map((r) => ({ ...r.value, conversation }));
+}
+
+// =============================================
+// 누적 클러스터링 (topic_clusters 테이블 기반)
+// =============================================
+
+// 기술 대화들에서 인사이트만 병렬 추출 (클러스터링 분리)
+export async function extractInsightsFromTechConversations(
+  conversations: ProjectConversation[],
+): Promise<Insight[]> {
+  if (conversations.length === 0) return [];
+
+  console.log(
+    `\n🔍 ${conversations.length}개 기술 대화에서 인사이트 추출 중...`,
+  );
+  const results = await runInBatches(conversations, 5, async (conv) => {
+    const insights = await extractInsights(conv);
+    console.log(`  ✅ "${conv.projectName}" → ${insights.length}개 인사이트`);
+    return insights;
+  });
+
+  const all: Insight[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === "fulfilled") all.push(...r.value);
+    else
+      console.error(
+        `  ❌ "${conversations[i].projectName}" 인사이트 추출 실패:`,
+        r.reason,
+      );
+  }
+  return all;
+}
+
+// 1차 후보 필터: 새 인사이트와 techStack 교집합 큰 클러스터 top-K
+export function prefilterPendingClusters(
+  newInsights: Insight[],
+  pending: PendingClusterRow[],
+  topK = 8,
+): PendingClusterRow[] {
+  if (pending.length <= topK) return pending;
+
+  const newTechs = new Set(
+    newInsights.flatMap((i) => i.techStack.map((t) => t.toLowerCase())),
+  );
+
+  const scored = pending.map((c) => {
+    const techs = (c.tech_stack ?? []).map((t) => t.toLowerCase());
+    let overlap = 0;
+    for (const t of techs) if (newTechs.has(t)) overlap++;
+    return { c, overlap };
+  });
+
+  scored.sort((a, b) => {
+    if (b.overlap !== a.overlap) return b.overlap - a.overlap;
+    // tie-break: 더 최근에 업데이트된 것 우선
+    return (b.c.last_updated_at ?? "").localeCompare(a.c.last_updated_at ?? "");
+  });
+
+  return scored.slice(0, topK).map((s) => s.c);
+}
+
+// 새 인사이트들을 기존 pending 클러스터에 합치거나 새 클러스터로 묶음 (Sonnet 1회)
+export async function mergeInsightsIntoClusters(
+  newInsights: Insight[],
+  candidates: PendingClusterRow[],
+): Promise<MergeResult> {
+  const empty: MergeResult = { existingUpdates: new Map(), newClusters: [] };
+  if (newInsights.length === 0) return empty;
+
+  const insightList = newInsights
+    .map(
+      (ins, i) =>
+        `[N${i}] 프로젝트: ${ins.sourceProject}\n주제: ${ins.topic}\n요약: ${ins.summary}\n기술스택: ${ins.techStack.join(", ")}\n발췌: ${ins.excerpt}`,
+    )
+    .join("\n\n");
+
+  const candidateList =
+    candidates.length === 0
+      ? "(기존 pending 클러스터 없음 — 모두 새 클러스터로)"
+      : candidates
+          .map(
+            (c) =>
+              `[E${c.id}] 주제: ${c.theme}\n방향: ${c.angle ?? "-"}\n기술스택: ${(c.tech_stack ?? []).join(", ")}\n포함 인사이트: ${c.insights.length}개`,
+          )
+          .join("\n\n");
+
+  const res = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 3000,
+    tools: [
+      {
+        name: "route_insights",
+        description:
+          "각 새 인사이트를 기존 클러스터에 합치거나 새 클러스터로 묶는다",
+        input_schema: {
+          type: "object" as const,
+          properties: {
+            decisions: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  new_insight_index: { type: "number" },
+                  target_existing_cluster_id: {
+                    type: "number",
+                    description:
+                      "기존 클러스터 ID로 합칠 때만 (E뒤 숫자). 새 클러스터로 묶을 거면 비워.",
+                  },
+                  target_new_cluster_key: {
+                    type: "string",
+                    description:
+                      "새 클러스터로 묶을 때만 (new_clusters[].key와 매칭). 기존 합칠 거면 비워.",
+                  },
+                },
+                required: ["new_insight_index"],
+              },
+            },
+            new_clusters: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  key: {
+                    type: "string",
+                    description:
+                      "decisions의 target_new_cluster_key와 매칭되는 임의 식별자",
+                  },
+                  theme: { type: "string", description: "클러스터 주제" },
+                  angle: { type: "string", description: "글 작성 방향" },
+                  quality_score: {
+                    type: "number",
+                    description: "1-5 (5=깊고 유익, 3=보통, 1=얕음)",
+                  },
+                  tech_stack: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "이 클러스터의 대표 기술 스택",
+                  },
+                },
+                required: [
+                  "key",
+                  "theme",
+                  "angle",
+                  "quality_score",
+                  "tech_stack",
+                ],
+              },
+            },
+          },
+          required: ["decisions", "new_clusters"],
+        },
+      },
+    ],
+    tool_choice: { type: "tool", name: "route_insights" },
+    messages: [
+      {
+        role: "user",
+        content: `새 인사이트들을 기존 pending 클러스터에 "합칠지" 또는 "새 클러스터로 묶을지" 판단해줘.
+
+규칙:
+- 기존 클러스터 주제와 핵심 일치(같은 라이브러리/같은 문제 영역) → target_existing_cluster_id로 합쳐
+- 그 외 → 새 클러스터 key 부여 후 묶고, new_clusters 배열에 그 key의 메타데이터 정의
+- 비슷한 새 인사이트들끼리는 같은 새 클러스터 key로 묶을 수 있음
+- 너무 얕거나 가치 없는 건 두 필드 모두 비워서 스킵
+- "Next.js"와 "Next.js App Router"처럼 큰 우산 vs 세부 주제는 합치는 쪽으로
+
+기존 pending 클러스터:
+${candidateList}
+
+새 인사이트:
+${insightList}`,
+      },
+    ],
+  });
+
+  const toolUse = res.content.find((c) => c.type === "tool_use");
+  if (!toolUse || toolUse.type !== "tool_use") return empty;
+
+  const input = toolUse.input as {
+    decisions: Array<{
+      new_insight_index: number;
+      target_existing_cluster_id?: number;
+      target_new_cluster_key?: string;
+    }>;
+    new_clusters: Array<{
+      key: string;
+      theme: string;
+      angle: string;
+      quality_score: number;
+      tech_stack: string[];
+    }>;
+  };
+
+  const existingUpdates = new Map<number, Insight[]>();
+  const newClusterMap = new Map<
+    string,
+    {
+      theme: string;
+      angle: string;
+      qualityScore: number;
+      techStack: string[];
+      insights: Insight[];
+    }
+  >();
+  for (const spec of input.new_clusters ?? []) {
+    newClusterMap.set(spec.key, {
+      theme: spec.theme,
+      angle: spec.angle,
+      qualityScore: spec.quality_score ?? 3,
+      techStack: spec.tech_stack ?? [],
+      insights: [],
+    });
+  }
+
+  for (const d of input.decisions ?? []) {
+    const insight = newInsights[d.new_insight_index];
+    if (!insight) continue;
+    if (d.target_existing_cluster_id != null) {
+      const arr = existingUpdates.get(d.target_existing_cluster_id) ?? [];
+      arr.push(insight);
+      existingUpdates.set(d.target_existing_cluster_id, arr);
+    } else if (
+      d.target_new_cluster_key &&
+      newClusterMap.has(d.target_new_cluster_key)
+    ) {
+      newClusterMap.get(d.target_new_cluster_key)!.insights.push(insight);
+    }
+  }
+
+  return {
+    existingUpdates,
+    newClusters: Array.from(newClusterMap.values()).filter(
+      (c) => c.insights.length > 0,
+    ),
+  };
+}
+
+// Insight → topic_clusters.insights JSONB 형식으로 변환
+export function toStoredInsight(i: Insight): StoredInsight {
+  return {
+    topic: i.topic,
+    summary: i.summary,
+    techStack: i.techStack,
+    sourceProject: i.sourceProject,
+    excerpt: i.excerpt,
+  };
+}
+
+// topic_clusters row 하나로 블로그 본문 생성 (Vercel function용)
+export async function generateDraftFromStoredCluster(cluster: {
+  theme: string;
+  angle: string | null;
+  insights: StoredInsight[];
+}): Promise<DraftPost | null> {
+  const pseudo: InsightCluster = {
+    theme: cluster.theme,
+    angle: cluster.angle ?? "",
+    qualityScore: 3,
+    insights: cluster.insights.map((s) => ({
+      topic: s.topic,
+      summary: s.summary,
+      techStack: s.techStack,
+      sourceProject: s.sourceProject,
+      excerpt: s.excerpt,
+    })),
+  };
+  return generateFromCluster(pseudo);
 }
